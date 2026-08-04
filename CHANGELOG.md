@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.7-youngcat.1] - 2026-08-04
+
+### Improvements
+
+- support GitHub Enterprise Server REST, GraphQL, authentication, and PR URLs
+- store PR identity in an `SPR-Pull-Request` Git trailer and preserve other
+  trailers through commit rewriting
+
+### Compatibility
+
+- the legacy `Pull Request:` section is not recognized
+
 ## [1.3.7] - 2025-08-25
 
 ### Improvements
