@@ -41,10 +41,18 @@ At various stages of a commit's lifecycle, `spr` will add lines to the commit me
 - After first creating a PR, `spr diff` will amend the commit message to include a line like this at the end:
 
   ```
-  Pull Request: https://github.com/example/project/pull/123
+  SPR-Pull-Request: https://github.com/example/project/pull/123
   ```
 
-  The presence or absence of this line is how `spr diff` knows whether a commit already has a PR created for it, and thus whether it should create a new PR or update an existing one.
+  This is a standard Git trailer. Its presence or absence is how `spr diff`
+  knows whether a commit already has a PR created for it, and thus whether it
+  should create a new PR or update an existing one. Other trailers, such as
+  `Co-authored-by` and `Signed-off-by`, remain in the same final trailer block
+  and are preserved by `spr format`, `spr amend`, and `spr land`.
+
+  The legacy `Pull Request:` section is not recognized. Replace it with an
+  `SPR-Pull-Request:` trailer before using this version of `spr` on an existing
+  commit.
 
 - `spr land` will amend the commit message to exactly match the title/description of the PR (just as `spr amend` does), as well as adding a line like this:
   ```
@@ -81,7 +89,7 @@ Test Plan:
 
 Reviewers: user-a, coworker-b
 
-Pull Request: https://github.com/example/my-thing/pull/123
+SPR-Pull-Request: https://github.com/example/my-thing/pull/123
 ```
 
 In this state, running `spr diff` again will update PR 123.
@@ -101,7 +109,7 @@ Reviewers: user-a, coworker-b
 
 Reviewed By: coworker-b
 
-Pull Request: https://github.com/example/my-thing/pull/123
+SPR-Pull-Request: https://github.com/example/my-thing/pull/123
 ```
 
 ### Reformatting the commit message

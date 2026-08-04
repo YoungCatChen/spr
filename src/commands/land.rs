@@ -11,7 +11,7 @@ use std::{io::Write, process::Stdio, time::Duration};
 use crate::{
     error::{Error, Result, ResultExt},
     github::{PullRequestState, PullRequestUpdate, ReviewStatus},
-    message::build_github_body_for_merging,
+    message::{build_github_body_for_merging, MessageSection},
     output::{output, write_commit_title},
     utils::run_command,
 };
@@ -67,6 +67,12 @@ pub async fn land(
 
     // Load Pull Request information
     let pull_request = gh.clone().get_pull_request(pull_request_number).await?;
+    let mut merge_message = pull_request.sections.clone();
+    if let Some(trailers) =
+        prepared_commit.message.get(&MessageSection::Trailers)
+    {
+        merge_message.insert(MessageSection::Trailers, trailers.clone());
+    }
 
     if pull_request.state != PullRequestState::Open {
         return Err(Error::new(formatdoc!(
@@ -308,7 +314,7 @@ pub async fn land(
                 .merge(pull_request_number)
                 .method(octocrab::params::pulls::MergeMethod::Squash)
                 .title(pull_request.title)
-                .message(build_github_body_for_merging(&pull_request.sections))
+                .message(build_github_body_for_merging(&merge_message))
                 .sha(format!("{}", pr_head_oid))
                 .send()
                 .await

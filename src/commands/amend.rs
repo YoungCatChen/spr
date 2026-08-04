@@ -8,7 +8,7 @@
 use crate::{
     error::{Error, Result},
     git::PreparedCommit,
-    message::validate_commit_message,
+    message::{validate_commit_message, MessageSection},
     output::{output, write_commit_title},
 };
 
@@ -58,8 +58,13 @@ pub async fn amend(
         write_commit_title(commit)?;
         let pull_request = pull_requests.pop().flatten();
         if let Some(pull_request) = pull_request {
+            let trailers =
+                commit.message.get(&MessageSection::Trailers).cloned();
             let pull_request = pull_request.await??;
             commit.message = pull_request.sections;
+            if let Some(trailers) = trailers {
+                commit.message.insert(MessageSection::Trailers, trailers);
+            }
         }
         failure = validate_commit_message(&commit.message, config).is_err()
             || failure;

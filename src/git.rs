@@ -321,17 +321,24 @@ impl Git {
 
         let mut message = parse_message(&message, MessageSection::Title);
 
-        let pull_request_number = message
-            .get(&MessageSection::PullRequest)
-            .and_then(|text| config.parse_pull_request_field(text));
+        let pull_request_number =
+            match message.get(&MessageSection::PullRequest) {
+                Some(text) => Some(
+                    config.parse_pull_request_field(text).ok_or_else(|| {
+                        Error::new(
+                            "Invalid SPR-Pull-Request trailer in commit \
+                                 message",
+                        )
+                    })?,
+                ),
+                None => None,
+            };
 
         if let Some(number) = pull_request_number {
             message.insert(
                 MessageSection::PullRequest,
                 config.pull_request_url(number),
             );
-        } else {
-            message.remove(&MessageSection::PullRequest);
         }
 
         Ok(PreparedCommit {
