@@ -19,7 +19,10 @@ type URI = String;
 )]
 pub struct SearchQuery;
 
-pub async fn list(config: &crate::config::Config) -> Result<()> {
+pub async fn list(
+    config: &crate::config::Config,
+    auth_token: &str,
+) -> Result<()> {
     let variables = search_query::Variables {
         query: format!(
             "repo:{}/{} is:open is:pr author:@me archived:false",
@@ -27,11 +30,11 @@ pub async fn list(config: &crate::config::Config) -> Result<()> {
         ),
     };
     let request_body = SearchQuery::build_query(variables);
-    let response_body: Response<search_query::ResponseData> =
-        octocrab::instance()
-            .post("/graphql", Some(&request_body))
-            .await
-            .context("Searching for open PRs".to_string())?;
+    let graphql_client = crate::github::new_graphql_client(config, auth_token)?;
+    let response_body: Response<search_query::ResponseData> = graphql_client
+        .post("/graphql", Some(&request_body))
+        .await
+        .context("Searching for open PRs".to_string())?;
 
     print_pr_info(response_body).ok_or_else(|| Error::new("unexpected error"))
 }

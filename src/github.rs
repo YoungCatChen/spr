@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 pub struct GitHub {
     config: crate::config::Config,
     git: crate::git::Git,
+    graphql_client: octocrab::Octocrab,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +97,32 @@ pub enum PullRequestState {
     Closed,
 }
 
+fn new_api_client(
+    base_uri: Option<String>,
+    auth_token: &str,
+) -> Result<octocrab::Octocrab> {
+    let mut builder =
+        octocrab::Octocrab::builder().personal_token(auth_token.to_string());
+    if let Some(base_uri) = base_uri {
+        builder = builder.base_uri(base_uri)?;
+    }
+    Ok(builder.build()?)
+}
+
+pub fn new_rest_client(
+    config: &crate::config::Config,
+    auth_token: &str,
+) -> Result<octocrab::Octocrab> {
+    new_api_client(config.rest_api_base_uri(), auth_token)
+}
+
+pub fn new_graphql_client(
+    config: &crate::config::Config,
+    auth_token: &str,
+) -> Result<octocrab::Octocrab> {
+    new_api_client(config.graphql_api_base_uri(), auth_token)
+}
+
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct UserWithName {
     pub login: String,
@@ -130,8 +157,17 @@ type GitObjectID = String;
 pub struct PullRequestMergeabilityQuery;
 
 impl GitHub {
-    pub fn new(config: crate::config::Config, git: crate::git::Git) -> Self {
-        Self { config, git }
+    pub fn new(
+        config: crate::config::Config,
+        git: crate::git::Git,
+        auth_token: &str,
+    ) -> Result<Self> {
+        let graphql_client = new_graphql_client(&config, auth_token)?;
+        Ok(Self {
+            config,
+            git,
+            graphql_client,
+        })
     }
 
     pub async fn get_github_user(login: String) -> Result<UserWithName> {
@@ -153,7 +189,11 @@ impl GitHub {
     }
 
     pub async fn get_pull_request(self, number: u64) -> Result<PullRequest> {
-        let GitHub { config, git } = self;
+        let GitHub {
+            config,
+            git,
+            graphql_client,
+        } = self;
 
         let variables = pull_request_query::Variables {
             name: config.repo.clone(),
@@ -162,9 +202,7 @@ impl GitHub {
         };
         let request_body = PullRequestQuery::build_query(variables);
         let response_body: Response<pull_request_query::ResponseData> =
-            octocrab::instance()
-                .post("/graphql", Some(&request_body))
-                .await?;
+            graphql_client.post("/graphql", Some(&request_body)).await?;
 
         if let Some(errors) = response_body.errors {
             let error =
@@ -381,7 +419,8 @@ impl GitHub {
         let request_body = PullRequestMergeabilityQuery::build_query(variables);
         let response_body: Response<
             pull_request_mergeability_query::ResponseData,
-        > = octocrab::instance()
+        > = self
+            .graphql_client
             .post("/graphql", Some(&request_body))
             .await?;
 

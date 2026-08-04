@@ -26,36 +26,83 @@ pub async fn init() -> Result<()> {
     ))?;
     let mut config = repo.config()?;
 
+    // Name of remote
+
+    console::Term::stdout().write_line("")?;
+
+    output(
+        "❓",
+        &formatdoc!(
+            "What's the name of the Git remote pointing to GitHub? Usually it's
+             'origin'."
+        ),
+    )?;
+
+    let remote = dialoguer::Input::<String>::new()
+        .with_prompt("Name of remote for GitHub")
+        .with_initial_text(
+            config
+                .get_string("spr.githubRemoteName")
+                .ok()
+                .unwrap_or_else(|| "origin".to_string()),
+        )
+        .interact_text()?;
+    config.set_str("spr.githubRemoteName", &remote)?;
+
+    let remote_url = repo.find_remote(&remote)?.url().map(String::from);
+    let inferred_host = remote_url
+        .as_deref()
+        .and_then(github_remote_details)
+        .map(|(host, _)| host);
+    let github_host = config
+        .get_string("spr.githubHost")
+        .ok()
+        .or(inferred_host)
+        .unwrap_or_else(|| "github.com".to_string());
+    let github_host = dialoguer::Input::<String>::new()
+        .with_prompt("GitHub host")
+        .with_initial_text(github_host)
+        .validate_with(|input: &String| validate_github_host(input))
+        .interact_text()?;
+    let github_host = normalize_github_host(&github_host);
+    config.set_str("spr.githubHost", &github_host)?;
+
     // GitHub Personal Access Token
 
     let github_auth_token = config
         .get_string("spr.githubAuthToken")
         .ok()
         .and_then(|value| if value.is_empty() { None } else { Some(value) });
-
-    let scopes = if let Some(token) = github_auth_token.as_deref() {
-        let response: AuthScopes = octocrab::OctocrabBuilder::new()
-            .personal_token(token)
-            .build()?
-            .get("/", Some(&()))
-            .await?;
-
-        response.scopes
+    let is_enterprise = github_host != "github.com";
+    let valid_auth = if let Some(token) = github_auth_token.as_deref() {
+        let client = rest_client_for_host(&github_host, token)?;
+        if is_enterprise {
+            client.current().user().await.is_ok()
+        } else {
+            let scopes = client
+                .get::<AuthScopes, _, _>("/", Some(&()))
+                .await
+                .map(|response| response.scopes)
+                .unwrap_or_default();
+            scopes.iter().any(|s| s == "repo")
+                && scopes.iter().any(|s| s == "user")
+                && scopes.iter().any(|s| s == "org" || s == "read:org")
+        }
     } else {
-        vec![]
+        false
     };
-
-    let valid_auth = scopes.iter().any(|s| s == "repo")
-        && scopes.iter().any(|s| s == "user")
-        && scopes.iter().any(|s| s == "org" || s == "read:org");
 
     let github_auth_token = if valid_auth {
         github_auth_token.unwrap()
+    } else if is_enterprise {
+        prompt_for_personal_access_token(
+            &github_host,
+            github_auth_token.as_deref(),
+        )?
     } else {
         console::Term::stdout().write_line("")?;
 
         let client_id = "Ov23liD6WOMYlLy12wkg";
-
         let client = octocrab::OctocrabBuilder::new()
             .base_uri("https://github.com")?
             .add_header(
@@ -63,7 +110,6 @@ pub async fn init() -> Result<()> {
                 "application/json".into(),
             )
             .build()?;
-
         let device_codes = client
             .authenticate_as_device(&client_id.into(), ["repo user read:org"])
             .await?;
@@ -92,41 +138,14 @@ pub async fn init() -> Result<()> {
             .poll_until_available(&client, &client_id.into())
             .await?;
         let token: String = auth.access_token.expose_secret().into();
-
-        config.set_str("spr.githubAuthToken", &token)?;
-
         token
     };
+    config.set_str("spr.githubAuthToken", &github_auth_token)?;
 
-    let octocrab = octocrab::OctocrabBuilder::new()
-        .personal_token(github_auth_token.clone())
-        .build()?;
+    let octocrab = rest_client_for_host(&github_host, &github_auth_token)?;
     let github_user = octocrab.current().user().await?;
 
     output("👋", &formatdoc!("Hello {}!", github_user.login))?;
-
-    // Name of remote
-
-    console::Term::stdout().write_line("")?;
-
-    output(
-        "❓",
-        &formatdoc!(
-            "What's the name of the Git remote pointing to GitHub? Usually it's
-             'origin'."
-        ),
-    )?;
-
-    let remote = dialoguer::Input::<String>::new()
-        .with_prompt("Name of remote for GitHub")
-        .with_initial_text(
-            config
-                .get_string("spr.githubRemoteName")
-                .ok()
-                .unwrap_or_else(|| "origin".to_string()),
-        )
-        .interact_text()?;
-    config.set_str("spr.githubRemoteName", &remote)?;
 
     // Name of the GitHub repo
 
@@ -137,22 +156,20 @@ pub async fn init() -> Result<()> {
         &formatdoc!(
             "What's the name of the GitHub repository. Please enter \
              'OWNER/REPOSITORY' (basically the bit that follow \
-             'github.com/' in the address.)"
+             '{github_host}/' in the address.)"
         ),
     )?;
 
-    let url = repo.find_remote(&remote)?.url().map(String::from);
-    let regex =
-        lazy_regex::regex!(r#"github\.com[/:]([\w\-\.]+/[\w\-\.]+?)(.git)?$"#);
     let github_repo = config
         .get_string("spr.githubRepository")
         .ok()
         .and_then(|value| if value.is_empty() { None } else { Some(value) })
         .or_else(|| {
-            url.as_ref()
-                .and_then(|url| regex.captures(url))
-                .and_then(|caps| caps.get(1))
-                .map(|m| m.as_str().to_string())
+            remote_url
+                .as_deref()
+                .and_then(github_remote_details)
+                .filter(|(host, _)| host.eq_ignore_ascii_case(&github_host))
+                .map(|(_, repository)| repository)
         })
         .unwrap_or_default();
 
@@ -215,6 +232,81 @@ pub async fn init() -> Result<()> {
     config.set_str("spr.branchPrefix", &branch_prefix)?;
 
     Ok(())
+}
+
+fn normalize_github_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn validate_github_host(host: &str) -> Result<()> {
+    let host = normalize_github_host(host);
+    if host.is_empty()
+        || !regex!(r"^[A-Za-z0-9.-]+(?::[0-9]+)?$").is_match(&host)
+    {
+        return Err(Error::new(
+            "GitHub host must be a hostname with an optional port",
+        ));
+    }
+    Ok(())
+}
+
+fn github_remote_details(url: &str) -> Option<(String, String)> {
+    let captures = regex!(
+        r"^(?:https://|ssh://)?(?:git@)?([\w.-]+(?::\d+)?)[/:]([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
+    )
+    .captures(url)?;
+    Some((
+        captures.get(1)?.as_str().to_string(),
+        captures.get(2)?.as_str().to_string(),
+    ))
+}
+
+fn rest_client_for_host(
+    github_host: &str,
+    auth_token: &str,
+) -> Result<octocrab::Octocrab> {
+    let mut builder =
+        octocrab::OctocrabBuilder::new().personal_token(auth_token.to_string());
+    if github_host != "github.com" {
+        builder = builder.base_uri(format!("https://{github_host}/api/v3"))?;
+    }
+    Ok(builder.build()?)
+}
+
+fn prompt_for_personal_access_token(
+    github_host: &str,
+    existing_token: Option<&str>,
+) -> Result<String> {
+    console::Term::stdout().write_line("")?;
+    output(
+        "🔑",
+        &formatdoc!(
+            "GitHub Enterprise requires a personal access token. Create one at
+             https://{github_host}/settings/tokens with repo, user, and
+             read:org access, then paste it below."
+        ),
+    )?;
+    let token = dialoguer::Password::new()
+        .with_prompt(if existing_token.is_some() {
+            "GitHub PAT (leave empty to keep the existing token)"
+        } else {
+            "GitHub Personal Access Token"
+        })
+        .allow_empty_password(existing_token.is_some())
+        .interact()?;
+    let token = if token.is_empty() {
+        existing_token.unwrap_or_default().to_string()
+    } else {
+        token
+    };
+    if token.is_empty() {
+        return Err(Error::new("Cannot continue without an access token."));
+    }
+    Ok(token)
 }
 
 fn validate_branch_prefix(branch_prefix: &str) -> Result<()> {
@@ -303,7 +395,41 @@ impl FromResponse for AuthScopes {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_branch_prefix;
+    use super::{
+        github_remote_details, normalize_github_host, validate_branch_prefix,
+        validate_github_host,
+    };
+
+    #[test]
+    fn test_github_host() {
+        assert_eq!(
+            normalize_github_host("https://github.example.com/"),
+            "github.example.com"
+        );
+        assert!(validate_github_host("github.example.com").is_ok());
+        assert!(validate_github_host("github.example.com:8443").is_ok());
+        assert!(validate_github_host("github.example.com/path").is_err());
+    }
+
+    #[test]
+    fn test_github_remote_details() {
+        for url in [
+            "https://github.example.com/acme/codez.git",
+            "git@github.example.com:acme/codez.git",
+            "ssh://git@github.example.com/acme/codez.git",
+        ] {
+            assert_eq!(
+                github_remote_details(url),
+                Some(("github.example.com".into(), "acme/codez".into()))
+            );
+        }
+        assert_eq!(
+            github_remote_details(
+                "ssh://git@github.example.com:8443/acme/codez.git"
+            ),
+            Some(("github.example.com:8443".into(), "acme/codez".into()))
+        );
+    }
 
     #[test]
     fn test_branch_prefix_rules() {

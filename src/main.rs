@@ -119,6 +119,10 @@ pub async fn spr() -> Result<()> {
             .or_else(|_| Ok("master".to_string())),
     }?;
 
+    let github_host = git_config
+        .get_string("spr.githubHost")
+        .unwrap_or_else(|_| "github.com".to_string());
+
     let branch_prefix = match cli.branch_prefix {
         Some(v) => Ok(v),
         None => git_config.get_string("spr.branchPrefix"),
@@ -151,6 +155,7 @@ pub async fn spr() -> Result<()> {
     let config = spr::config::Config::new(
         github_owner,
         github_repo,
+        github_host,
         github_remote_name,
         github_master_branch,
         branch_prefix,
@@ -169,13 +174,16 @@ pub async fn spr() -> Result<()> {
         None => git_config.get_string("spr.githubAuthToken"),
     }?;
 
-    octocrab::initialise(
-        octocrab::Octocrab::builder()
-            .personal_token(github_auth_token.clone())
-            .build()?,
-    );
+    octocrab::initialise(spr::github::new_rest_client(
+        &config,
+        &github_auth_token,
+    )?);
 
-    let mut gh = spr::github::GitHub::new(config.clone(), git.clone());
+    let mut gh = spr::github::GitHub::new(
+        config.clone(),
+        git.clone(),
+        &github_auth_token,
+    )?;
 
     match cli.command {
         Commands::Diff(opts) => {
@@ -187,7 +195,9 @@ pub async fn spr() -> Result<()> {
         Commands::Amend(opts) => {
             commands::amend::amend(opts, &git, &mut gh, &config).await?
         }
-        Commands::List => commands::list::list(&config).await?,
+        Commands::List => {
+            commands::list::list(&config, &github_auth_token).await?
+        }
         Commands::Patch(opts) => {
             commands::patch::patch(opts, &git, &mut gh, &config).await?
         }
