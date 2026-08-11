@@ -1,52 +1,295 @@
+# Release workflow for this downstream fork.
+#
+# PROVENANCE — where each decision came from, so that the next change (or the
+# next breakage) knows where to go looking for a fresh answer.
+#
+# 1. Why this file replaces the upstream one, rather than patching it.
+#    Upstream's release.yml was written 2022-02-10 and never touched again. It
+#    pinned `runs-on: macos-10.15`, a runner image GitHub later retired, so the
+#    job sat queued for exactly 24h and was auto-cancelled having executed zero
+#    steps. Evidence:
+#      https://github.com/spacedentist/spr/actions/runs/17209322855
+#    Consequence: upstream v1.3.5 (2023-11), v1.3.6 (2025-04) and v1.3.7
+#    (2025-08) all ship with an EMPTY asset list, while v1.0.0..v1.3.4 each
+#    have a tarball. Nobody noticed for three years because Homebrew — the
+#    actual distribution channel — builds from the GitHub source tarball and
+#    never consumed those assets at all.
+#    Lesson encoded below: assert the artifacts, and never pin a runner label
+#    that can be retired out from under us.
+#
+# 2. The macOS universal recipe (two targets + lipo, on macos-14) is lifted
+#    from the throwaway workflow in commit
+#    f96bb7dca4a67d1d2b04d99525c1b88c53eb2d6e ("Build macOS universal release
+#    asset"), which is what actually produced the v1.3.7-youngcat.1 macOS
+#    asset. Its branch (build-v1.3.7-youngcat.1) was deleted after use, so that
+#    commit is the only remaining copy.
+#
+# 3. The Linux dependency list mirrors Homebrew's formula, which is the
+#    authoritative statement of what spr needs in order to build:
+#      https://github.com/Homebrew/homebrew-core/blob/master/Formula/s/spr.rb
+#        depends_on "pkgconf" => :build
+#        depends_on "rust"    => :build
+#        on_linux { depends_on "openssl@3"; depends_on "zlib-ng-compat" }
+#    Note it declares neither cmake nor libgit2: git2 vendors its own C source,
+#    and our Cargo.toml sets `git2 = { default-features = false }`, which drops
+#    the https/ssh features and hence libgit2's OpenSSL requirement. OpenSSL is
+#    needed on Linux only, for octocrab's "opentls" feature; macOS gets TLS
+#    from Security.framework, which is why the macOS job installs nothing.
+#
+# 4. `runs-on: ubuntu-latest` + `container:` (rather than pinning e.g.
+#    `ubuntu-22.04`) is the shape Homebrew itself uses, and is what keeps item 1
+#    from happening again — the label stays evergreen while the build
+#    environment is nailed down explicitly:
+#      https://github.com/Homebrew/homebrew-core/blob/master/.github/workflows/tests.yml
+#
+# 5. The container is pinned to ubuntu:22.04 because the deployment target
+#    (Roblox coder) reports `ldd (Ubuntu GLIBC 2.35-0ubuntu3.13) 2.35`. glibc
+#    is backward but not forward compatible, so building against the oldest
+#    baseline we must support keeps working as targets are upgraded. Do NOT
+#    bump this to 24.04 (glibc 2.39) without re-checking every target machine;
+#    the "Verify artifact" step below asserts the baseline and will fail loudly.
+#
+# 6. Asset names deliberately carry NO version number. That makes
+#      /releases/latest/download/spr-macos-universal.tar.gz
+#    a stable URL, which is consumed by `.chezmoiexternal.toml.tmpl` in the rbx
+#    dotfiles layer (it re-checks every 14 days). Renaming these assets, or
+#    letting a release be flagged as a prerelease, breaks that consumer. The
+#    "Verify stable download URLs" step guards exactly that contract.
+#
+# 7. Upstream had `prerelease: ${{ contains(github.ref, '-') }}`. That is
+#    harmless upstream, whose tags look like `v1.3.7`, but fatal here: every
+#    downstream tag contains a hyphen (`v1.3.7-youngcat.1`), so every release
+#    would be flagged prerelease, and GitHub's /releases/latest endpoint skips
+#    prereleases and answers 404. This workflow marks releases latest
+#    explicitly instead.
+#
+# 8. Action majors are kept current (checkout v7, upload-artifact v7,
+#    download-artifact v8 -- all node24). The very first probe run of this file
+#    was already warning that the v4 series targets the deprecated Node.js 20
+#    and was being force-run on Node.js 24, which is chapter one of exactly the
+#    same story as item 1, so it is fixed rather than tolerated. Before bumping
+#    again, diff the input names against each action's action.yml: `path`,
+#    `merge-multiple` and `if-no-files-found` all survived v4 -> v7/v8.
+
 name: Release
 
 on:
   push:
     tags:
       - "v*"
+    # Push any ci-probe/** branch to exercise the build + verify path without
+    # creating a release or uploading anything, so that iterating on this
+    # workflow does not cost a version tag. The publish job is gated on tags.
+    branches:
+      - "ci-probe/**"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   macos:
-    name: Build for MacOS
-    runs-on: macos-10.15
+    name: Build macOS universal
+    runs-on: macos-14
     env:
-      CARGO_TERM_COLOR: always
-
+      # Oldest macOS we promise to run on. From provenance item 2.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
 
-      - name: Get version
-        id: get_version
-        run: echo ::set-output name=version::${GITHUB_REF/refs\/tags\/v/}
-
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          profile: minimal
-          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --all-targets --locked
 
-      - name: Build Release Mac
+      - name: Build universal binary
         run: |
-          cargo build --release
-          strip target/release/spr
-          tar vczC target/release/ spr >spr-${{ steps.get_version.outputs.version }}-macos.tar.gz
-          ls -lh spr-*.tar.gz
+          set -eux
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/x86_64-apple-darwin/release/spr \
+            target/aarch64-apple-darwin/release/spr \
+            -output dist/spr
+          strip -x dist/spr
 
-      - name: Extract release notes
-        id: release_notes
-        uses: ffurrer2/extract-release-notes@v1
+      - name: Verify artifact
+        run: |
+          set -eux
+          # Both slices must be present, or Rosetta-less machines break.
+          lipo -info dist/spr
+          lipo -info dist/spr | grep -q x86_64
+          lipo -info dist/spr | grep -q arm64
+          # The binary must actually execute and self-report the version that
+          # Cargo.toml claims. This is the assertion upstream never had.
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          dist/spr --version
+          dist/spr --version | grep -qF "spr ${version}"
 
-      - name: Release
-        uses: softprops/action-gh-release@v1
+      - name: Package
+        run: |
+          set -eux
+          tar -C dist -czf spr-macos-universal.tar.gz spr
+          shasum -a 256 spr-macos-universal.tar.gz \
+            > spr-macos-universal.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v7
         with:
-          body: ${{ steps.release_notes.outputs.release_notes }}
-          prerelease: ${{ contains(github.ref, '-') }}
-          files: |
-            ./spr-*.tar.gz
+          name: macos-universal
+          path: spr-macos-universal.tar.gz*
+          if-no-files-found: error
 
+  linux:
+    name: Build Linux x86_64
+    runs-on: ubuntu-latest
+    # See provenance items 4 and 5 before changing either of these two lines.
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends \
+            build-essential pkg-config libssl-dev zlib1g-dev \
+            curl ca-certificates git
+
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --all-targets --locked
+
+      - name: Build release binary
+        run: |
+          set -eux
+          cargo build --release --locked
+          mkdir -p dist
+          cp target/release/spr dist/spr
+          strip dist/spr
+
+      - name: Verify artifact
+        run: |
+          set -eux
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          dist/spr --version
+          dist/spr --version | grep -qF "spr ${version}"
+          # Guard the glibc baseline from provenance item 5: if someone bumps
+          # the container image, the highest referenced glibc symbol version
+          # rises and the deployment target can no longer run the binary. Fail
+          # here rather than on the user's machine.
+          baseline=GLIBC_2.35
+          highest=$(objdump -T dist/spr \
+            | grep -oE 'GLIBC_2\.[0-9]+' | sort -V -u | tail -1)
+          echo "highest referenced glibc symbol: ${highest}"
+          echo "baseline (deployment target):    ${baseline}"
+          test "$(printf '%s\n%s\n' "${highest}" "${baseline}" \
+            | sort -V | tail -1)" = "${baseline}"
+          # Record what we dynamically link, so a future OpenSSL major bump is
+          # visible in the log instead of being a mystery at runtime.
+          ldd dist/spr
+
+      - name: Package
+        run: |
+          set -eux
+          tar -C dist -czf spr-linux-x86_64.tar.gz spr
+          sha256sum spr-linux-x86_64.tar.gz \
+            > spr-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64
+          path: spr-linux-x86_64.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release assets
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # Deliberately NOT gated on tags: this also runs for ci-probe/** pushes,
+      # so the upload/download artifact pairing and the checksum files are
+      # exercised by the probe rather than first being tried during a real
+      # release. Every step below IS gated, since publishing is the part that
+      # must happen only for a genuine version tag.
+      - name: Check collected artifacts
+        run: |
+          set -eux
+          ls -l artifacts
+          cd artifacts
+          test -f spr-macos-universal.tar.gz
+          test -f spr-linux-x86_64.tar.gz
+          sha256sum -c spr-macos-universal.tar.gz.sha256
+          sha256sum -c spr-linux-x86_64.tar.gz.sha256
+
+      - name: Assert tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eux
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          test "refs/tags/v${version}" = "${GITHUB_REF}"
+
+      - name: Ensure release exists and is marked latest
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="${GITHUB_REF#refs/tags/}"
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              >/dev/null 2>&1; then
+            # Release was created by hand (the usual flow, so that notes can be
+            # written from CHANGELOG.md). Only enforce the latest/prerelease
+            # flags that our stable-URL contract depends on; leave notes alone.
+            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --prerelease=false --latest
+          else
+            gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --title "spr ${tag}" --generate-notes --latest --verify-tag
+          fi
+
+      - name: Upload assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release upload "${tag}" artifacts/* --clobber \
+            --repo "${GITHUB_REPOSITORY}"
+
+      - name: Verify stable download URLs
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -eux
+          # This is the contract the chezmoi external in the rbx dotfiles layer
+          # depends on (provenance item 6). If this fails, that layer's
+          # `chezmoi apply` will start failing 14 days from now instead.
+          base="https://github.com/${GITHUB_REPOSITORY}"
+          base="${base}/releases/latest/download"
+          for name in spr-macos-universal.tar.gz spr-linux-x86_64.tar.gz; do
+            ok=
+            for attempt in 1 2 3 4 5; do
+              if curl -fsSL --max-time 120 -o /dev/null \
+                  "${base}/${name}"; then
+                ok=yes
+                break
+              fi
+              sleep 5
+            done
+            test -n "${ok}"
+          done
