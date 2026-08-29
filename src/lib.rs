@@ -10,6 +10,7 @@ pub mod config;
 pub mod error;
 pub mod git;
 pub mod github;
+pub(crate) mod http_client;
 pub mod message;
 pub mod output;
 pub mod utils;

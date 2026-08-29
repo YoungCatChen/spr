@@ -101,12 +101,7 @@ fn new_api_client(
     base_uri: Option<String>,
     auth_token: &str,
 ) -> Result<octocrab::Octocrab> {
-    let mut builder =
-        octocrab::Octocrab::builder().personal_token(auth_token.to_string());
-    if let Some(base_uri) = base_uri {
-        builder = builder.base_uri(base_uri)?;
-    }
-    Ok(builder.build()?)
+    crate::http_client::new_octocrab(base_uri.as_deref(), Some(auth_token), &[])
 }
 
 pub fn new_rest_client(

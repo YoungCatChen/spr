@@ -103,13 +103,14 @@ pub async fn init() -> Result<()> {
         console::Term::stdout().write_line("")?;
 
         let client_id = "Ov23liD6WOMYlLy12wkg";
-        let client = octocrab::OctocrabBuilder::new()
-            .base_uri("https://github.com")?
-            .add_header(
+        let client = crate::http_client::new_octocrab(
+            Some("https://github.com"),
+            None,
+            &[(
                 http::HeaderName::from_static("accept"),
                 "application/json".into(),
-            )
-            .build()?;
+            )],
+        )?;
         let device_codes = client
             .authenticate_as_device(&client_id.into(), ["repo user read:org"])
             .await?;
@@ -269,12 +270,9 @@ fn rest_client_for_host(
     github_host: &str,
     auth_token: &str,
 ) -> Result<octocrab::Octocrab> {
-    let mut builder =
-        octocrab::OctocrabBuilder::new().personal_token(auth_token.to_string());
-    if github_host != "github.com" {
-        builder = builder.base_uri(format!("https://{github_host}/api/v3"))?;
-    }
-    Ok(builder.build()?)
+    let base_uri = (github_host != "github.com")
+        .then(|| format!("https://{github_host}/api/v3"));
+    crate::http_client::new_octocrab(base_uri.as_deref(), Some(auth_token), &[])
 }
 
 fn prompt_for_personal_access_token(
