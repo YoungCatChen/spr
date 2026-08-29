@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "spr"
-version = "1.3.7-youngcat.1"
+version = "1.3.7-youngcat.2"
 dependencies = [
  "bytes",
  "clap",

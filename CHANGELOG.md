@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.3.7-youngcat.2] - 2026-08-29
+
+### Fixes
+
+- honor standard proxy environment variables for GitHub API requests
+
 ## [1.3.7-youngcat.1] - 2026-08-04
 
 ### Improvements
